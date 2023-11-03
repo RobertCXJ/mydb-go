@@ -30,23 +30,12 @@ type TransactionManager interface {
 // TransactionManagerImpl 结构体实现了 TransactionManager 接口
 type TransactionManagerImpl struct {
 	file        *os.File
-	fc          io.WriteCloser
 	counterLock sync.Mutex
 	xidCounter  int64
 }
 
-func NewTransactionManagerImpl(raf *os.File, fc io.WriteCloser) *TransactionManagerImpl {
-	manager := &TransactionManagerImpl{
-		file:       raf,
-		fc:         fc,
-		xidCounter: 0,
-	}
-	manager.checkXIDCounter()
-	return manager
-}
-
 // Create 创建一个新的 TransactionManagerImpl
-func Create(path string) (TransactionManager, error) {
+func Create(path string) (*TransactionManagerImpl, error) {
 	filePath := path + XidSuffix
 
 	file, err := os.Create(filePath)
@@ -66,15 +55,25 @@ func Create(path string) (TransactionManager, error) {
 }
 
 // Open 打开一个已存在的 TransactionManagerImpl
-func Open(path string) (TransactionManager, error) {
+func Open(path string) (*TransactionManagerImpl, error) {
 	filePath := path + XidSuffix
 
-	file, err := os.OpenFile(filePath, os.O_RDWR, 0644)
+	file, err := os.OpenFile(filePath, os.O_RDWR, 0666)
 	if err != nil {
 		return nil, err
 	}
 
-	return &TransactionManagerImpl{file: file}, nil
+	// 分配8个字节给buf
+	buf := make([]byte, LenXidHeaderLength)
+	// 使用文件对象 t.file 的 ReadAt 方法，将文件的内容读取到 buf
+	_, err = file.ReadAt(buf, 0)
+	if err != nil {
+		panic(err)
+	}
+
+	xid := int64(buf[0])
+
+	return &TransactionManagerImpl{file: file, counterLock: sync.Mutex{}, xidCounter: xid}, nil
 }
 
 func (t *TransactionManagerImpl) checkXIDCounter() {
@@ -153,6 +152,7 @@ func (t *TransactionManagerImpl) Abort(xid int64) {
 	t.updateXID(xid, FieldTranAborted)
 }
 
+// 通过检查事务xid来检查事务是否可以正常提交运行
 func (t *TransactionManagerImpl) checkXID(xid int64, status byte) bool {
 	offset := t.getXidPosition(xid)
 	buf := make([]byte, XidFieldSize)
@@ -185,11 +185,7 @@ func (t *TransactionManagerImpl) IsAborted(xid int64) bool {
 }
 
 func (t *TransactionManagerImpl) Close() {
-	err := t.fc.Close()
-	if err != nil {
-		panic(err)
-	}
-	err = t.file.Close()
+	err := t.file.Close()
 	if err != nil {
 		panic(err)
 	}
